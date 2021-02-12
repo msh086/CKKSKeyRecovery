@@ -24,6 +24,24 @@ void print_parameters(std::shared_ptr<seal::SEALContext> context) {
     std::cout << ") bits" << std::endl;
 }
 
+/**
+ * NOTE on CRT and NTT
+ *  let s be the product of all the coeff modulus(assume there are k modulus)
+ *  decomposing the coeffs of a polynomial in R_s into a (k x N) matrix (CRT decompose)
+ *  is a homomorphic mapping wrt addition & multiplication & inversion
+ *  (the proof for inversion homomorphism can be easily derived from the multiplication homomorphism,
+ *  while the proof for multiplication homomorphism can be done by simply writing coeffs out)
+ *
+ * the NTT operates in a similar way as DFT and canonical mapping:
+ * evaluate the decomposed polynomials at w^0, w^1, ..., w^(N-1) where w is the N-primitive root modulo p_i
+ * multiplication of polynomials becomes element-wise addition in the NTT domain
+ * the matrix for transformation shares common properties as DFT & canonical mapping matrices:
+ *  e.g. the product of it and its transpose conjugate is NI where I is the identity matrix
+ * the homomorphism for addition, multiplication and inversion between first and second CRT layer
+ * can be proved in a similar way as the canonical embedding, since w is a N-th primitive root modulo q
+ * here the NTT modulus q is exactly the CRT modulus, since q mod N == 1 is guaranteed upon its generation,
+ * see numth.cpp::get_primes line 294-317, where the modulus chain is generated
+ * */
 bool inv_dcrtpoly(util::ConstCoeffIter operand, std::size_t coeff_count, std::vector<Modulus> const& coeff_modulus,
                   util::CoeffIter result) {
    bool * has_inv = new bool[coeff_modulus.size()];
@@ -46,6 +64,9 @@ bool inv_dcrtpoly(util::ConstCoeffIter operand, std::size_t coeff_count, std::ve
    return true;
 }
 
+/**
+ * snippet for polynomial multiplication in NTT domain can be found at rlwe.cpp::encrypt_zero_asymmetric line 203-205
+ * */
 void mul_dcrtpoly(util::ConstCoeffIter a, util::ConstCoeffIter b, std::size_t coeff_count,
                   std::vector<Modulus> const& coeff_modulus, util::CoeffIter result) {
 #pragma omp parallel for
@@ -58,6 +79,10 @@ void mul_dcrtpoly(util::ConstCoeffIter a, util::ConstCoeffIter b, std::size_t co
    }
 }
 
+/**
+ * snippet for polynomial addition in NTT domain can be found at rlwe.cpp::encrypt_zero_asymmetric line 227-229
+ * NTT (second CRT layer) memory layout is the same as the first layer
+ * */
 void add_dcrtpoly(util::ConstCoeffIter a, util::ConstCoeffIter b, std::size_t coeff_count,
                   std::vector<Modulus> const& coeff_modulus, util::CoeffIter result) {
 #pragma omp parallel for
@@ -97,6 +122,11 @@ void to_eval_rep(util::CoeffIter a, size_t coeff_count, size_t coeff_modulus_cou
    }
 }
 
+/**
+ * NOTE CKKSKeyRecovery & SEAL:
+ *  this functions is the same as ckks.h::decode_internal line 687 to line 690
+ *  (transform each polynomial from NTT domain into CRT)
+ * */
 void to_coeff_rep(util::CoeffIter a, size_t coeff_count, size_t coeff_modulus_count, util::NTTTables const* small_ntt_tables) {
 #pragma omp parallel for
    for (size_t j = 0; j < coeff_modulus_count; j++) {
@@ -104,6 +134,28 @@ void to_coeff_rep(util::CoeffIter a, size_t coeff_count, size_t coeff_modulus_co
    }
 }
 
+/**
+ * NOTE CKKSKeyRecovery:
+ *  code below is similar to ckks.h::decode_internal line 692 to line 733
+ *  the infty_norm of so-called "encoding error" is actually different from it in the paper
+ *  with plaintext before decoding as m, re-encoded but not yet rounded plaintext as m*
+ *  this project calculates the value of inf_norm(CastToDoubleCoeff(m - RoundToIntCoeff(m*)))
+ *
+ * NOTE SEAL:
+ *  context_data.upper_half_threshold() == (product of all coeff modulus + 1) >> 1
+ *  in ckks.h::decode_internal line 692 to line 733,
+ *  coeffs of plain_copy are multi-precision integers, its memory is arranged in the following manner:
+ *  (let d = coeff_modulus_size, n = coeff_count)
+ *  [d uint64, from lsb to msb] ... [...] (the count of [...] is n)
+ *  >> multi-precision memory layout <<
+ *  -----------------------
+ *  the double loop transforms the multi-precision integers into double
+ *  the branch calculates (coeff - modulus) when coeff >= (1+modulus)/2, which transforms coeffs into [-(q-1)/2, (q+1)/2)
+ *  -----------------------
+ *  the coeff ranges from [-(q-1)/2, (q+1)/2), when representing it using a unsigned integer,
+ *  the non-negative subrange is kept untouched, while the negative subrange is shifted to [(q+1)/2, q) by adding a q
+ *  this representation is homomorphic wrt addition / multiplication / inverse (PROOF?)
+ * */
 long double infty_norm(util::ConstCoeffIter a, SEALContext::ContextData const* context_data) {
    auto &ciphertext_parms = context_data->parms();
    auto &coeff_modulus = ciphertext_parms.coeff_modulus();
